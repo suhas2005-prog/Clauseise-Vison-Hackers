@@ -1,0 +1,95 @@
+# clausewise.py
+import os
+from ibm_watson import NaturalLanguageUnderstandingV1
+from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
+from ibm_watson.natural_language_understanding_v1 import Features, EntitiesOptions
+from ibm_watsonx_ai import Credentials, APIClient
+import docx2txt
+import PyPDF2
+import streamlit as st
+
+# ====================================
+# IBM Watson NLU Setup
+# ====================================
+def init_watson_nlu(api_key: str, url: str, version="2021-08-01"):
+    authenticator = IAMAuthenticator(api_key)
+    return NaturalLanguageUnderstandingV1(version=version, authenticator=authenticator, service_url=url)
+
+def extract_entities(nlu, text: str):
+    response = nlu.analyze(text=text, features=Features(entities=EntitiesOptions(emotion=False, sentiment=False, limit=50))).get_result()
+    return response.get("entities", [])
+
+# ====================================
+# IBM Granite (watsonx) Setup
+# ====================================
+def init_watsonx(api_key: str, url: str, username: str, project_id: str):
+    creds = Credentials(username=username, api_key=api_key, url=url, instance_id="openshift", version="5.2")
+    return APIClient(creds, project_id)
+
+def granite_generate(client, model_id: str, prompt: str):
+    model = client.model(model_id)
+    resp = model.generate_text(prompt)
+    return resp
+
+# ====================================
+# Clause Extraction Utility
+# ====================================
+def extract_clauses(text: str):
+    # naive: split on line breaks + numbering (you can replace with regex or NLP)
+    return [c.strip() for c in text.split('\n') if c.strip()]
+
+# ====================================
+# File Loader
+# ====================================
+def load_text(filepath: str) -> str:
+    ext = filepath.lower().split('.')[-1]
+    if ext == 'txt':
+        return open(filepath, 'r', encoding='utf-8').read()
+    elif ext == 'docx':
+        return docx2txt.process(filepath)
+    elif ext == 'pdf':
+        reader = PyPDF2.PdfReader(open(filepath, 'rb'))
+        return "\n".join(page.extract_text() for page in reader.pages)
+    else:
+        raise ValueError(f"Unsupported format: {ext}")
+
+# ====================================
+# Streamlit UI
+# ====================================
+def main():
+    st.title("ClauseWise: Legal Document Analyzer")
+
+    uploaded = st.file_uploader("Upload a legal document (PDF, DOCX, or TXT)", type=["pdf","docx","txt"])
+    if not uploaded:
+        return
+
+    api_key = st.text_input("IBM API Key", type="password")
+    url = st.text_input("IBM Service URL")
+    username = st.text_input("IBM Username")
+    project_id = st.text_input("Watsonx Project ID")
+    model_id = st.text_input("Granite Model ID", value="ibm/granite-3-3-8b-instruct")
+
+    if st.button("Analyze Document"):
+        text = load_text(uploaded)
+        st.markdown("### Extracted Clauses")
+        clauses = extract_clauses(text)
+        st.write(clauses)
+
+        if api_key and url:
+            nlu = init_watson_nlu(api_key, url)
+            st.markdown("### Named Entities")
+            entities_per_clause = [extract_entities(nlu, c) for c in clauses[:5]]
+            for i, ents in enumerate(entities_per_clause):
+                st.write(f"Clause {i+1} Entities:", ents)
+
+        if api_key and username and project_id:
+            client = init_watsonx(api_key, url, username, project_id)
+            st.markdown("### Clause Simplification (first 5 clauses)")
+            for i, clause in enumerate(clauses[:5]):
+                prompt = f"Simplify this legal clause into plain English:\n\n{clause}\n\nSimplified clause:"
+                simplified = granite_generate(client, model_id, prompt)
+                st.write(f"**Original:** {clause}")
+                st.write(f"**Simplified:** {simplified}")
+
+if __name__ == "__main__":
+    main()
